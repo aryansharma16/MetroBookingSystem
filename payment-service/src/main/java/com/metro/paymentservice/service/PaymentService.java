@@ -1,7 +1,12 @@
 package com.metro.paymentservice.service;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,7 +15,9 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import com.metro.paymentservice.client.RazorpayGateway;
+import com.metro.paymentservice.dto.request.PaymentFailedRequestDto;
 import com.metro.paymentservice.dto.request.VerifyPaymentRequestDto;
+import com.metro.paymentservice.dto.response.PaymentDetailsResponseDto;
 import com.metro.paymentservice.dto.response.PaymentOrderResponseDto;
 import com.metro.paymentservice.entity.Payment;
 import com.metro.paymentservice.entity.PaymentStatus;
@@ -123,16 +130,156 @@ public class PaymentService {
             throw new InvalidSignatureException("Payment verification failed");
         }
 
-        if (payment.getStatus() == PaymentStatus.CREATED) {
-            paymentRepository.markStatus(payment.getId(), req.getRazorpayPaymentId(),
-                    PaymentStatus.CREATED, PaymentStatus.SUCCESS);
+        recordSuccessfulPayment(payment, req.getRazorpayPaymentId());
+    }
+
+    // Razorpay calls this for every event on the account. The raw body is checked first.
+    public void handleWebhook(String payload, String signature) {
+        if (signature == null || !razorpayGateway.verifyWebhookSignature(payload, signature)) {
+            throw new InvalidSignatureException("Invalid webhook signature");
+        }
+
+        JSONObject root;
+        String event;
+        try {
+            root = new JSONObject(payload);
+            event = root.getString("event");
+        } catch (JSONException e) {
+            log.warn("Webhook body could not be parsed, ignoring");
+            return;
+        }
+
+        if (!"payment.captured".equals(event)) {
+            log.info("Ignoring webhook event {}", event);
+            return;
+        }
+
+        String razorpayPaymentId;
+        String orderId;
+        long paidPaise;
+        try {
+            JSONObject entity = root.getJSONObject("payload").getJSONObject("payment").getJSONObject("entity");
+            razorpayPaymentId = entity.getString("id");
+            orderId = entity.getString("order_id");
+            paidPaise = entity.getLong("amount");
+        } catch (JSONException e) {
+            log.warn("payment.captured webhook is missing fields, ignoring");
+            return;
+        }
+
+        // The account may be shared with other apps, so unknown orders are not an error
+        Payment payment = paymentRepository.findByRazorpayOrderId(orderId).orElse(null);
+        if (payment == null) {
+            log.info("Webhook for unknown order {}, ignoring", orderId);
+            return;
+        }
+
+        long expectedPaise = payment.getAmount().multiply(BigDecimal.valueOf(100)).longValueExact();
+        if (paidPaise != expectedPaise) {
+            log.error("Amount mismatch for booking {}: expected {} paise, Razorpay captured {}. Needs manual review.",
+                    payment.getBookingId(), expectedPaise, paidPaise);
+            return;
+        }
+
+        // Answer 200 even if the state already moved, so Razorpay stops retrying
+        try {
+            recordSuccessfulPayment(payment, razorpayPaymentId);
+        } catch (InvalidPaymentStateException e) {
+            log.warn("Webhook for booking {} not applied: {}", payment.getBookingId(), e.getMessage());
+        }
+    }
+
+    // Used when the user's checkout is abandoned or fails. Booking expiry still covers the case where this call never arrives.
+    public void markPaymentFailed(PaymentFailedRequestDto req, Long userId) {
+        Payment payment = paymentRepository.findByRazorpayOrderId(req.getRazorpayOrderId()).orElse(null);
+        if (payment == null || !payment.getUserId().equals(userId)) {
+            throw new PaymentNotFoundException("Payment not found");
+        }
+
+        if (payment.getStatus() == PaymentStatus.FAILED) {
+            return;
+        }
+        if (payment.getStatus() != PaymentStatus.CREATED) {
+            throw new InvalidPaymentStateException("Payment already " + payment.getStatus());
+        }
+
+        String reason = req.getReason() == null ? "USER_CANCELLED_CHECKOUT" : req.getReason();
+        int won = paymentRepository.transitionWithFailureReason(payment.getId(), reason,
+                PaymentStatus.CREATED, PaymentStatus.FAILED);
+        if (won == 0) {
+            // another request changed it first
+            Payment current = paymentRepository.findById(payment.getId()).orElseThrow();
+            if (current.getStatus() == PaymentStatus.FAILED) {
+                return;
+            }
+            throw new InvalidPaymentStateException("Payment already " + current.getStatus());
+        }
+
+        // If Kafka fails, the booking simply expires after its window. The user still gets 200.
+        try {
+            paymentEventPublisher.publishPaymentFailed(payment, reason);
+        } catch (EventPublishException e) {
+            log.warn("PaymentFailed publish failed for booking {}, booking will expire", payment.getBookingId());
+        }
+    }
+
+    // Admin refund of a successful payment. Booking gets refund-completed and marks itself REFUNDED.
+    public void adminRefund(Long bookingId) {
+        Payment payment = paymentRepository.findByBookingId(bookingId).orElse(null);
+        if (payment == null) {
+            throw new PaymentNotFoundException("Payment not found for booking " + bookingId);
+        }
+
+        if (payment.getStatus() != PaymentStatus.SUCCESS && payment.getStatus() != PaymentStatus.REFUNDED) {
+            throw new InvalidPaymentStateException("Only successful payments can be refunded. Current status: "
+                    + payment.getStatus());
+        }
+
+        refundForBooking(bookingId, "ADMIN_MANUAL_REFUND");
+    }
+
+    public List<PaymentDetailsResponseDto> getPaymentsForAdmin(String status) {
+        List<Payment> payments;
+        if (status == null) {
+            payments = paymentRepository.findAllByOrderByCreatedAtDesc();
+        } else {
+            PaymentStatus filter;
+            try {
+                filter = PaymentStatus.valueOf(status);
+            } catch (IllegalArgumentException e) {
+                throw new InvalidPaymentStateException("Invalid status: " + status);
+            }
+            payments = paymentRepository.findByStatusOrderByCreatedAtDesc(filter);
+        }
+
+        List<PaymentDetailsResponseDto> result = new ArrayList<>();
+        for (Payment payment : payments) {
+            PaymentDetailsResponseDto dto = new PaymentDetailsResponseDto();
+            dto.setId(payment.getId());
+            dto.setBookingId(payment.getBookingId());
+            dto.setUserId(payment.getUserId());
+            dto.setAmount(payment.getAmount());
+            dto.setStatus(payment.getStatus());
+            dto.setRazorpayOrderId(payment.getRazorpayOrderId());
+            dto.setRazorpayPaymentId(payment.getRazorpayPaymentId());
+            dto.setFailureReason(payment.getFailureReason());
+            dto.setCreatedAt(payment.getCreatedAt());
+            result.add(dto);
+        }
+        return result;
+    }
+
+    // Shared by the browser verify call and the webhook. Money has moved, so FAILED is accepted too.
+    private void recordSuccessfulPayment(Payment payment, String razorpayPaymentId) {
+        if (payment.getStatus() == PaymentStatus.CREATED || payment.getStatus() == PaymentStatus.FAILED) {
+            paymentRepository.markStatus(payment.getId(), razorpayPaymentId,
+                    payment.getStatus(), PaymentStatus.SUCCESS);
         } else if (payment.getStatus() != PaymentStatus.SUCCESS) {
             throw new InvalidPaymentStateException("Payment already " + payment.getStatus());
         }
 
         // Re-read so we publish what is actually stored
-        Payment current = paymentRepository.findByRazorpayOrderId(req.getRazorpayOrderId())
-                .orElseThrow();
+        Payment current = paymentRepository.findById(payment.getId()).orElseThrow();
 
         if (current.getStatus() != PaymentStatus.SUCCESS) {
             throw new InvalidPaymentStateException("Payment already " + current.getStatus());
@@ -162,8 +309,8 @@ public class PaymentService {
         }
     }
 
-    // Called by the refund-required consumer. Safe to receive more than once.
-    public void refundForBooking(Long bookingId) {
+    // Called by the refund-required consumer and the admin refund. Safe to receive more than once.
+    public void refundForBooking(Long bookingId, String reason) {
         Payment payment = paymentRepository.findByBookingId(bookingId).orElse(null);
         if (payment == null) {
             log.error("Refund requested for unknown booking {}", bookingId);
@@ -190,7 +337,7 @@ public class PaymentService {
         }
 
         try {
-            razorpayGateway.refund(payment);
+            razorpayGateway.refund(payment, reason);
         } catch (RuntimeException e) {
             // any failure: put it back so a retry can try again
             paymentRepository.transition(payment.getId(),

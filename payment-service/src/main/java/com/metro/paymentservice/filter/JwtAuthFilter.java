@@ -25,8 +25,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         return path.startsWith("/swagger-ui")
                 || path.startsWith("/v3/api-docs")
-                || path.startsWith("/actuator");
-        // later: the Razorpay webhook path goes here too
+                || path.startsWith("/actuator")
+                || path.equals("/payments/webhook");
     }
 
     @Override

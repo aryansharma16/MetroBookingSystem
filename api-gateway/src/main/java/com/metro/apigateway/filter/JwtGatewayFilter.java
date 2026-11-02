@@ -25,6 +25,10 @@ public class JwtGatewayFilter implements GlobalFilter, Ordered {
             "/auth/login",
             "/auth/verify",
             "/auth/resend-verification",   // must be reachable without a token
+            "/auth/forgot-password",
+            "/auth/reset-password",
+            "/payments/webhook",          // Razorpay calls this, it has no JWT
+            "/actuator/health",           // load balancer health checks
             "/oauth2",
             "/login/oauth2",
             // Swagger on the gateway (dev only, remove before deploying)
@@ -42,6 +46,13 @@ public class JwtGatewayFilter implements GlobalFilter, Ordered {
             "/lines",
             "/segments",
             "/fare-slabs"
+    );
+
+    private static final List<String> ADMIN_PATHS = List.of(
+            "/auth/admin",
+            "/bookings/admin",
+            "/payments/admin",
+            "/bookings/ticket"
     );
 
     public JwtGatewayFilter(JwtUtil jwtUtil) {
@@ -69,7 +80,7 @@ public class JwtGatewayFilter implements GlobalFilter, Ordered {
             return rejectRequest(exchange, HttpStatus.UNAUTHORIZED);
         }
 
-        if (isAdminOnlyWrite(path, request.getMethod())) {
+        if (isAdminOnlyWrite(path, request.getMethod()) || isAdminPath(path)) {
             Claims claims = jwtUtil.extractClaims(token);
             String role = claims.get("role", String.class);
 
@@ -102,6 +113,15 @@ public class JwtGatewayFilter implements GlobalFilter, Ordered {
         }
 
         for (String adminPath : ADMIN_ONLY_PATHS) {
+            if (path.startsWith(adminPath)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isAdminPath(String path) {
+        for (String adminPath : ADMIN_PATHS) {
             if (path.startsWith(adminPath)) {
                 return true;
             }

@@ -21,6 +21,10 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
 
     List<Booking> findByStatus(BookingStatus status);
 
+    List<Booking> findAllByOrderByCreatedAtDesc();
+
+    List<Booking> findByStatusOrderByCreatedAtDesc(BookingStatus status);
+
     @Modifying
     @Query("UPDATE Booking b SET b.status = :newStatus " +
            "WHERE b.status = :oldStatus AND b.createdAt < :cutoff")
@@ -36,4 +40,14 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     int updateStatusIfCurrent(@Param("id") Long id,
                               @Param("oldStatus") BookingStatus oldStatus,
                               @Param("newStatus") BookingStatus newStatus);
+
+    // gate scan: only a CONFIRMED ticket can be used, and only once
+    @Modifying(clearAutomatically = true)
+    @Transactional
+    @Query("UPDATE Booking b SET b.status = :newStatus, b.usedAt = :usedAt " +
+           "WHERE b.id = :id AND b.status = :oldStatus")
+    int markTicketUsed(@Param("id") Long id,
+                       @Param("oldStatus") BookingStatus oldStatus,
+                       @Param("newStatus") BookingStatus newStatus,
+                       @Param("usedAt") LocalDateTime usedAt);
 }

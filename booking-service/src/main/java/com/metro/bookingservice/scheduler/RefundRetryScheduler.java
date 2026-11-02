@@ -26,9 +26,14 @@ public class RefundRetryScheduler {
     // every 5 minutes by default
     @Scheduled(fixedDelayString = "${booking.refund-retry.rate-ms:300000}")
     public void retryRefunds() {
-        for (Booking b : bookingRepository.findByStatus(BookingStatus.PAID_AFTER_EXPIRY)) {
+        retryRefunds(BookingStatus.PAID_AFTER_EXPIRY, "BOOKING_EXPIRED_AFTER_PAYMENT");
+        retryRefunds(BookingStatus.REFUND_REQUESTED, "USER_CANCELLED");
+    }
+
+    private void retryRefunds(BookingStatus status, String reason) {
+        for (Booking b : bookingRepository.findByStatus(status)) {
             try {
-                refundEventPublisher.publishRefundRequired(b.getId(), "BOOKING_EXPIRED_AFTER_PAYMENT");
+                refundEventPublisher.publishRefundRequired(b.getId(), reason);
             } catch (EventPublishException e) {
                 log.warn("Kafka unavailable, refund retry deferred");
                 break;

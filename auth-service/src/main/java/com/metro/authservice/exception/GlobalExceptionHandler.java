@@ -37,7 +37,37 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<Map<String, String>> handleEmailSendFailed(EmailSendFailedException ex) {
 	    return buildResponse(ex.getMessage(), HttpStatus.SERVICE_UNAVAILABLE);
 	}
-	
+
+	@ExceptionHandler(InvalidResetTokenException.class)
+	public ResponseEntity<Map<String, String>> handleInvalidResetToken(InvalidResetTokenException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+	}
+
+	@ExceptionHandler(PasswordChangeNotAllowedException.class)
+	public ResponseEntity<Map<String, String>> handlePasswordChangeNotAllowed(PasswordChangeNotAllowedException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+	}
+
+	@ExceptionHandler(UnauthorizedException.class)
+	public ResponseEntity<Map<String, String>> handleUnauthorized(UnauthorizedException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.UNAUTHORIZED);
+	}
+
+	@ExceptionHandler(AdminAccessRequiredException.class)
+	public ResponseEntity<Map<String, String>> handleAdminAccessRequired(AdminAccessRequiredException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.FORBIDDEN);
+	}
+
+	@ExceptionHandler(UserNotFoundException.class)
+	public ResponseEntity<Map<String, String>> handleUserNotFound(UserNotFoundException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.NOT_FOUND);
+	}
+
+	@ExceptionHandler(InvalidRoleChangeException.class)
+	public ResponseEntity<Map<String, String>> handleInvalidRoleChange(InvalidRoleChangeException ex) {
+		return buildResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+	}
+
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	public ResponseEntity<Map<String , String>> HandleValidationErrors(MethodArgumentNotValidException ex){
 		Map<String , String> errors = new HashMap<>();

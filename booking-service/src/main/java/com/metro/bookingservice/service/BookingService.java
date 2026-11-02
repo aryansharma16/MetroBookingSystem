@@ -1,5 +1,6 @@
 package com.metro.bookingservice.service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,13 +17,16 @@ import com.metro.bookingservice.dto.response.RouteResponseDto;
 import com.metro.bookingservice.entity.Booking;
 import com.metro.bookingservice.entity.BookingStatus;
 import com.metro.bookingservice.event.BookingEventPublisher;
+import com.metro.bookingservice.event.PaymentFailedEvent;
 import com.metro.bookingservice.event.PaymentSuccessEvent;
 import com.metro.bookingservice.event.RefundEventPublisher;
 import com.metro.bookingservice.exception.BookingNotFoundException;
+import com.metro.bookingservice.exception.EventPublishException;
 import com.metro.bookingservice.exception.InvalidBookingRequestException;
 import com.metro.bookingservice.exception.InvalidBookingStatusException;
 import com.metro.bookingservice.exception.RouteNotFoundException;
 import com.metro.bookingservice.exception.StationServiceUnavailableException;
+import com.metro.bookingservice.exception.TicketAlreadyUsedException;
 import com.metro.bookingservice.repository.BookingRepository;
 
 import feign.FeignException;
@@ -91,9 +95,27 @@ public class BookingService {
             throw new BookingNotFoundException("Booking not found");
         }
 
-        if (booking.getStatus() != BookingStatus.PENDING) {
+        if (booking.getStatus() != BookingStatus.PENDING && booking.getStatus() != BookingStatus.CONFIRMED) {
             throw new InvalidBookingStatusException(
-                    "Only PENDING bookings can be cancelled. Current status: " + booking.getStatus());
+                    "Only PENDING or CONFIRMED bookings can be cancelled. Current status: " + booking.getStatus());
+        }
+
+        if (booking.getStatus() == BookingStatus.CONFIRMED) {
+            // paid ticket: ask Payment for a refund, the refund consumer marks it REFUNDED later
+            int requested = bookingRepository.updateStatusIfCurrent(
+                    bookingId, BookingStatus.CONFIRMED, BookingStatus.REFUND_REQUESTED);
+            if (requested == 0) {
+                BookingStatus now = bookingRepository.findById(bookingId).orElseThrow().getStatus();
+                throw new InvalidBookingStatusException(
+                        "Only PENDING or CONFIRMED bookings can be cancelled. Current status: " + now);
+            }
+            try {
+                refundEventPublisher.publishRefundRequired(bookingId, "USER_CANCELLED");
+            } catch (EventPublishException e) {
+                // the refund retry scheduler will publish it later
+                log.warn("Refund request for booking {} not published now, will retry", bookingId);
+            }
+            return toResponseDto(bookingRepository.findById(bookingId).orElseThrow());
         }
 
         // compare-and-set: if the payment consumer confirmed it in the meantime, this changes 0 rows
@@ -101,8 +123,12 @@ public class BookingService {
                 bookingId, BookingStatus.PENDING, BookingStatus.CANCELLED);
         if (updated == 0) {
             BookingStatus now = bookingRepository.findById(bookingId).orElseThrow().getStatus();
+            if (now == BookingStatus.CONFIRMED) {
+                // payment confirmed it just now, so run the cancel again and take the refund path
+                return cancelBooking(bookingId, userId);
+            }
             throw new InvalidBookingStatusException(
-                    "Only PENDING bookings can be cancelled. Current status: " + now);
+                    "Only PENDING or CONFIRMED bookings can be cancelled. Current status: " + now);
         }
 
         return toResponseDto(bookingRepository.findById(bookingId).orElseThrow());
@@ -172,6 +198,90 @@ public class BookingService {
                 booking.getId(), current);
     }
 
+    // admin: gate device looks up a ticket by its QR code
+    public BookingResponseDto getBookingByTicketCode(String ticketCode) {
+        Booking booking = bookingRepository.findByTicketCode(ticketCode).orElse(null);
+        if (booking == null) {
+            throw new BookingNotFoundException("Ticket not found");
+        }
+        return toResponseDto(booking);
+    }
+
+    // admin: gate device marks a ticket as used when it is scanned
+    public BookingResponseDto useTicket(String ticketCode) {
+        Booking booking = bookingRepository.findByTicketCode(ticketCode).orElse(null);
+        if (booking == null) {
+            throw new BookingNotFoundException("Ticket not found");
+        }
+        if (booking.getStatus() == BookingStatus.USED) {
+            throw new TicketAlreadyUsedException("Ticket already used at " + booking.getUsedAt());
+        }
+        if (booking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new InvalidBookingStatusException("Ticket is not valid. Current status: " + booking.getStatus());
+        }
+
+        // compare-and-set: a second scan at the same time changes 0 rows
+        int updated = bookingRepository.markTicketUsed(
+                booking.getId(), BookingStatus.CONFIRMED, BookingStatus.USED, LocalDateTime.now());
+        if (updated == 0) {
+            Booking current = bookingRepository.findById(booking.getId()).orElse(null);
+            if (current == null) {
+                throw new BookingNotFoundException("Ticket not found");
+            }
+            if (current.getStatus() == BookingStatus.USED) {
+                throw new TicketAlreadyUsedException("Ticket already used at " + current.getUsedAt());
+            }
+            throw new InvalidBookingStatusException("Ticket is not valid. Current status: " + current.getStatus());
+        }
+
+        return toResponseDto(bookingRepository.findById(booking.getId()).orElseThrow());
+    }
+
+    // admin: all bookings, optionally filtered by status
+    public List<BookingResponseDto> getAllBookings(String status) {
+        List<Booking> bookings;
+        if (status == null || status.isBlank()) {
+            bookings = bookingRepository.findAllByOrderByCreatedAtDesc();
+        } else {
+            BookingStatus filter;
+            try {
+                filter = BookingStatus.valueOf(status);
+            } catch (IllegalArgumentException e) {
+                throw new InvalidBookingRequestException("Invalid status: " + status);
+            }
+            bookings = bookingRepository.findByStatusOrderByCreatedAtDesc(filter);
+        }
+
+        List<BookingResponseDto> result = new ArrayList<>();
+        for (Booking booking : bookings) {
+            result.add(toResponseDto(booking));
+        }
+        return result;
+    }
+
+    // Called by the Kafka consumer. Payment failed for this booking, so it can no longer be paid
+    // on time. A late success is still handled by handlePaymentSuccess (FAILED -> PAID_AFTER_EXPIRY).
+    public void handlePaymentFailed(PaymentFailedEvent event) {
+        Booking booking = bookingRepository.findById(event.getBookingId()).orElse(null);
+
+        if (booking == null) {
+            log.error("PaymentFailed for unknown booking {}", event.getBookingId());
+            return;
+        }
+        if (!booking.getUserId().equals(event.getUserId())) {
+            log.error("PaymentFailed user mismatch for booking {}, needs manual review", booking.getId());
+            return;
+        }
+
+        int failed = bookingRepository.updateStatusIfCurrent(
+                booking.getId(), BookingStatus.PENDING, BookingStatus.FAILED);
+        if (failed == 1) {
+            log.info("Booking {} marked FAILED", booking.getId());
+        } else {
+            log.info("PaymentFailed for booking {} ignored (not PENDING)", booking.getId());
+        }
+    }
+
     private BookingResponseDto toResponseDto(Booking booking) {
         BookingResponseDto dto = new BookingResponseDto();
         dto.setId(booking.getId());
@@ -182,6 +292,7 @@ public class BookingService {
         dto.setDistanceKm(booking.getDistanceKm());
         dto.setStatus(booking.getStatus().name());
         dto.setCreatedAt(booking.getCreatedAt());
+        dto.setUsedAt(booking.getUsedAt());
         return dto;
     }
 }

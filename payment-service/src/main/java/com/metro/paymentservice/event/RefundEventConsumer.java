@@ -26,6 +26,6 @@ public class RefundEventConsumer {
             log.warn("Skipping malformed RefundRequired event");
             return;
         }
-        paymentService.refundForBooking(event.getBookingId());
+        paymentService.refundForBooking(event.getBookingId(), event.getReason());
     }
 }

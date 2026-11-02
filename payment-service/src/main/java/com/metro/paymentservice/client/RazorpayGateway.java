@@ -17,11 +17,14 @@ public class RazorpayGateway {
 
     private final RazorpayClient client;
     private final String keySecret;
+    private final String webhookSecret;
 
     public RazorpayGateway(@Value("${razorpay.key-id}") String keyId,
-                           @Value("${razorpay.key-secret}") String keySecret) throws RazorpayException {
+                           @Value("${razorpay.key-secret}") String keySecret,
+                           @Value("${razorpay.webhook-secret}") String webhookSecret) throws RazorpayException {
         this.client = new RazorpayClient(keyId, keySecret);
         this.keySecret = keySecret;
+        this.webhookSecret = webhookSecret;
     }
 
     public String createOrder(Payment payment) {
@@ -52,13 +55,22 @@ public class RazorpayGateway {
         }
     }
 
+    // Checks the signature over the raw webhook body. Must be called before the body is parsed.
+    public boolean verifyWebhookSignature(String payload, String signature) {
+        try {
+            return com.razorpay.Utils.verifyWebhookSignature(payload, signature, webhookSecret);
+        } catch (RazorpayException e) {
+            return false;
+        }
+    }
+
     // Refunds the full amount of a captured payment.
-    public void refund(Payment payment) {
+    public void refund(Payment payment, String reason) {
         try {
             long paise = payment.getAmount().multiply(BigDecimal.valueOf(100)).longValueExact();
 
             JSONObject notes = new JSONObject();
-            notes.put("reason", "BOOKING_EXPIRED_AFTER_PAYMENT");
+            notes.put("reason", reason == null ? "BOOKING_EXPIRED_AFTER_PAYMENT" : reason);
             notes.put("bookingId", String.valueOf(payment.getBookingId()));
 
             JSONObject options = new JSONObject();

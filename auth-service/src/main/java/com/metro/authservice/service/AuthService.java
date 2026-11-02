@@ -1,10 +1,14 @@
 package com.metro.authservice.service;
 
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.mail.MailException;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -14,12 +18,19 @@ import org.springframework.transaction.annotation.Transactional;
 import com.metro.authservice.dto.request.LoginRequestDto;
 import com.metro.authservice.dto.request.RegisterRequestDto;
 import com.metro.authservice.dto.response.RegisterResponseDto;
+import com.metro.authservice.dto.response.UserResponseDto;
 import com.metro.authservice.entity.User;
+import com.metro.authservice.exception.AdminAccessRequiredException;
 import com.metro.authservice.exception.EmailAlreadyExistsException;
 import com.metro.authservice.exception.EmailNotVerifiedException;
 import com.metro.authservice.exception.EmailSendFailedException; // NEW import
 import com.metro.authservice.exception.InvalidCredentialsException;
+import com.metro.authservice.exception.InvalidResetTokenException;
+import com.metro.authservice.exception.InvalidRoleChangeException;
 import com.metro.authservice.exception.InvalidVerificationTokenException;
+import com.metro.authservice.exception.PasswordChangeNotAllowedException;
+import com.metro.authservice.exception.UnauthorizedException;
+import com.metro.authservice.exception.UserNotFoundException;
 import com.metro.authservice.repository.UserRepository;
 import com.metro.authservice.util.JwtUtil;
 
@@ -41,6 +52,9 @@ public class AuthService {
 
 	@Autowired
 	private JwtUtil jwtUtil;
+
+	@Value("${app.password-reset.expiry-minutes:30}")
+	private long passwordResetExpiryMinutes;
 
 	// NEW: a real BCrypt hash of a throwaway password. Login checks it when the email is unknown,
 	// so unknown and known emails take about the same time (closes the timing leak).
@@ -152,5 +166,132 @@ public class AuthService {
 			log.error("Resend verification email failed for {}: {}", email, e.getMessage());
 			throw new EmailSendFailedException();
 		}
+	}
+
+	// sends a password reset link. Does nothing (silently) for unknown emails and Google accounts,
+	// so the caller can't learn which emails exist.
+	@Transactional
+	public void forgotPassword(String email) {
+		User user = userRepository.findByEmail(email).orElse(null);
+		if (user == null || !"LOCAL".equals(user.getAuthProvider())) {
+			return;
+		}
+
+		String token = UUID.randomUUID().toString();
+		user.setPasswordResetToken(token);
+		user.setPasswordResetExpiry(LocalDateTime.now().plusMinutes(passwordResetExpiryMinutes));
+		userRepository.save(user);
+
+		try {
+			emailService.sendPasswordResetEmail(email, token);
+		} catch (MailException e) {
+			log.error("Password reset email failed for {}: {}", email, e.getMessage());
+			throw new EmailSendFailedException();
+		}
+	}
+
+	@Transactional
+	public void resetPassword(String token, String newPassword) {
+		User user = userRepository.findByPasswordResetToken(token).orElse(null);
+		if (user == null || user.getPasswordResetExpiry() == null
+				|| user.getPasswordResetExpiry().isBefore(LocalDateTime.now())) {
+			throw new InvalidResetTokenException();
+		}
+
+		user.setPassword(passwordEncoder.encode(newPassword));
+		user.setPasswordResetToken(null);
+		user.setPasswordResetExpiry(null);
+		// the reset link was sent to this inbox, so the email counts as verified too
+		user.setEmailVerified(true);
+		userRepository.save(user);
+	}
+
+	@Transactional
+	public void changePassword(String authHeader, String currentPassword, String newPassword) {
+		User user = getUserFromAuthHeader(authHeader);
+		if (user.getPassword() == null) {
+			throw new PasswordChangeNotAllowedException();
+		}
+		if (!passwordEncoder.matches(currentPassword, user.getPassword())) {
+			throw new InvalidCredentialsException();
+		}
+
+		user.setPassword(passwordEncoder.encode(newPassword));
+		userRepository.save(user);
+	}
+
+	public UserResponseDto getCurrentUser(String authHeader) {
+		return toUserResponseDto(getUserFromAuthHeader(authHeader));
+	}
+
+	public List<UserResponseDto> getAllUsers(String authHeader) {
+		requireAdmin(getUserFromAuthHeader(authHeader));
+
+		List<UserResponseDto> result = new ArrayList<UserResponseDto>();
+		for (User user : userRepository.findAll()) {
+			result.add(toUserResponseDto(user));
+		}
+		return result;
+	}
+
+	@Transactional
+	public UserResponseDto updateUserRole(String authHeader, Long userId, String role) {
+		User caller = getUserFromAuthHeader(authHeader);
+		requireAdmin(caller);
+
+		if (userId.equals(caller.getId())) {
+			throw new InvalidRoleChangeException();
+		}
+
+		User target = userRepository.findById(userId).orElse(null);
+		if (target == null) {
+			throw new UserNotFoundException(userId);
+		}
+
+		// the target's current JWT keeps the old role until it expires (about 24 hours)
+		target.setRole(role);
+		User saved = userRepository.save(target);
+		return toUserResponseDto(saved);
+	}
+
+	// reads the userId claim from the Bearer token and loads that user from the DB
+	public User getUserFromAuthHeader(String authHeader) {
+		if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+			throw new UnauthorizedException();
+		}
+
+		String token = authHeader.substring(7);
+		if (!jwtUtil.isTokenValid(token)) {
+			throw new UnauthorizedException();
+		}
+
+		Object userId = jwtUtil.extractClaims(token).get("userId");
+		if (!(userId instanceof Number)) {
+			throw new UnauthorizedException();
+		}
+
+		User user = userRepository.findById(((Number) userId).longValue()).orElse(null);
+		if (user == null) {
+			throw new UnauthorizedException();
+		}
+		return user;
+	}
+
+	// the role is checked against the DB, not the token
+	private void requireAdmin(User user) {
+		if (!"ADMIN".equals(user.getRole())) {
+			throw new AdminAccessRequiredException();
+		}
+	}
+
+	private UserResponseDto toUserResponseDto(User user) {
+		UserResponseDto dto = new UserResponseDto();
+		dto.setId(user.getId());
+		dto.setEmail(user.getEmail());
+		dto.setName(user.getName());
+		dto.setRole(user.getRole());
+		dto.setAuthProvider(user.getAuthProvider());
+		dto.setEmailVerified(user.isEmailVerified());
+		return dto;
 	}
 }

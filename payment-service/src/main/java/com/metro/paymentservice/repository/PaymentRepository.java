@@ -22,6 +22,10 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
 
     List<Payment> findByStatusAndEventPublishedFalse(PaymentStatus status);
 
+    List<Payment> findAllByOrderByCreatedAtDesc();
+
+    List<Payment> findByStatusOrderByCreatedAtDesc(PaymentStatus status);
+
     @Modifying(clearAutomatically = true)
     @Transactional
     @Query("UPDATE Payment p SET p.razorpayOrderId = :orderId " +
@@ -41,6 +45,16 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
     @Transactional
     @Query("UPDATE Payment p SET p.eventPublished = true WHERE p.id = :id")
     int markEventPublished(@Param("id") Long id);
+
+    // status change and failure reason in one compare-and-set, used when the user abandons checkout
+    @Modifying(clearAutomatically = true)
+    @Transactional
+    @Query("UPDATE Payment p SET p.status = :newStatus, p.failureReason = :reason " +
+           "WHERE p.id = :id AND p.status = :oldStatus")
+    int transitionWithFailureReason(@Param("id") Long id,
+                                    @Param("reason") String reason,
+                                    @Param("oldStatus") PaymentStatus oldStatus,
+                                    @Param("newStatus") PaymentStatus newStatus);
 
     // status-only compare-and-set, used by the refund flow
     @Modifying(clearAutomatically = true)

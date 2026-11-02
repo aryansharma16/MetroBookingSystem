@@ -42,10 +42,14 @@ public class Booking {
     private BigDecimal fare;       // frozen — what was actually paid
     private double distanceKm; // frozen — trip fact at that time
 
+    // varchar, not a MySQL ENUM column, so adding a new status does not need a schema change
     @Enumerated(EnumType.STRING)
+    @Column(length = 30, columnDefinition = "varchar(30)")
     private BookingStatus status;
 
     private LocalDateTime createdAt;
+
+    private LocalDateTime usedAt;   // set when the ticket is scanned at the gate
     
     @PrePersist                 //PrePersist — a JPA life cycle hook. It means "run this method automatically, right before this entity is saved to the database for the first time.
     public void prePersist() {

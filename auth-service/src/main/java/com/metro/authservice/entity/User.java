@@ -1,5 +1,7 @@
 package com.metro.authservice.entity;
 
+import java.time.LocalDateTime;
+
 import jakarta.persistence.*;
 import lombok.Data;
 
@@ -25,6 +27,12 @@ public class User {
 
     @Column(nullable = true)
     private String verificationToken;
+
+    @Column(nullable = true)
+    private String passwordResetToken;
+
+    @Column(nullable = true)
+    private LocalDateTime passwordResetExpiry;
 
     @Column(nullable = false)
     private String authProvider;   // "LOCAL" or "GOOGLE"

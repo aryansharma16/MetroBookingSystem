@@ -27,8 +27,17 @@ public class RefundCompletedConsumer {
             log.warn("Skipping malformed RefundCompleted event");
             return;
         }
+        // CONFIRMED covers an admin manual refund done from payment-service
         int updated = bookingRepository.updateStatusIfCurrent(
                 event.getBookingId(), BookingStatus.PAID_AFTER_EXPIRY, BookingStatus.REFUNDED);
+        if (updated == 0) {
+            updated = bookingRepository.updateStatusIfCurrent(
+                    event.getBookingId(), BookingStatus.REFUND_REQUESTED, BookingStatus.REFUNDED);
+        }
+        if (updated == 0) {
+            updated = bookingRepository.updateStatusIfCurrent(
+                    event.getBookingId(), BookingStatus.CONFIRMED, BookingStatus.REFUNDED);
+        }
         if (updated == 1) {
             log.info("Booking {} marked REFUNDED", event.getBookingId());
         } else {

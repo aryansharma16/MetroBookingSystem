@@ -37,6 +37,36 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, String>> handleSameStation(StationAlreadyExistsException ex) {
         return buildErrorResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
     }
+    @ExceptionHandler(StationInUseException.class)
+    public ResponseEntity<Map<String, String>> handleStationInUse(StationInUseException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(LineInUseException.class)
+    public ResponseEntity<Map<String, String>> handleLineInUse(LineInUseException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(SegmentNotFoundException.class)
+    public ResponseEntity<Map<String, String>> handleSegmentNotFound(SegmentNotFoundException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(InvalidSegmentException.class)
+    public ResponseEntity<Map<String, String>> handleInvalidSegment(InvalidSegmentException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(FareSlabNotFoundException.class)
+    public ResponseEntity<Map<String, String>> handleFareSlabNotFound(FareSlabNotFoundException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(InvalidFareSlabException.class)
+    public ResponseEntity<Map<String, String>> handleInvalidFareSlab(InvalidFareSlabException ex) {
+        return buildErrorResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
+
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<Map<String, String>> handleIntegrity(DataIntegrityViolationException e) {
     	Map<String, String> body = new HashMap<String, String>();

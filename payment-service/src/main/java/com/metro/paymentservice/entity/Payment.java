@@ -46,6 +46,8 @@ public class Payment {
     private String razorpayOrderId;
 
     private String razorpayPaymentId;
+
+    private String failureReason;
     
     @Column(name = "event_published", nullable = false)
     private boolean eventPublished = false;

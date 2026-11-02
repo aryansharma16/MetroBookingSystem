@@ -6,4 +6,5 @@ import com.metro.stationservice.entity.Station;
 
 public interface StationRepository extends JpaRepository<Station, Long>{
 	boolean existsByNameIgnoreCase(String name);
+	boolean existsByNameIgnoreCaseAndIdNot(String name, Long id);
 }

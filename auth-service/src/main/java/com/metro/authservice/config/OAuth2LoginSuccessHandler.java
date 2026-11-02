@@ -3,6 +3,7 @@ package com.metro.authservice.config;
 import java.io.IOException;
 import java.util.Optional;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
@@ -20,10 +21,13 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
 
     private final UserRepository userRepository;
     private final JwtUtil jwtUtil;
+    private final String oauthRedirectUrl;
 
-    public OAuth2LoginSuccessHandler(UserRepository userRepository, JwtUtil jwtUtil) {
+    public OAuth2LoginSuccessHandler(UserRepository userRepository, JwtUtil jwtUtil,
+                                     @Value("${app.frontend.oauth-redirect-url}") String oauthRedirectUrl) {
         this.userRepository = userRepository;
         this.jwtUtil = jwtUtil;
+        this.oauthRedirectUrl = oauthRedirectUrl;
     }
 
     @Override
@@ -39,9 +43,7 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
 
         // NEW: only trust the email if Google says it is verified
         if (email == null || !Boolean.TRUE.equals(googleEmailVerified)) {
-            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-            response.setContentType("application/json");
-            response.getWriter().write("{\"error\": \"Google email not verified\"}");
+            response.sendRedirect(oauthRedirectUrl + "?error=google_email_not_verified");
             return;
         }
 
@@ -77,7 +79,6 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
 
         String token = jwtUtil.generateToken(user.getId(), user.getEmail(), user.getRole());
 
-        response.setContentType("application/json");
-        response.getWriter().write("{\"token\": \"" + token + "\"}");
+        response.sendRedirect(oauthRedirectUrl + "?token=" + token);
     }
 }

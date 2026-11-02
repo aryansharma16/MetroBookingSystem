@@ -44,7 +44,12 @@ public class GlobalExceptionHandler {
     
     @ExceptionHandler(InvalidBookingRequestException.class)
     public ResponseEntity<Map<String, String>> handleInvalidBooking(InvalidBookingRequestException ex) {
-        return buildResponse(ex.getMessage(), HttpStatus.SERVICE_UNAVAILABLE);
+        return buildResponse(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(TicketAlreadyUsedException.class)
+    public ResponseEntity<Map<String, String>> handleTicketAlreadyUsed(TicketAlreadyUsedException ex) {
+        return buildResponse(ex.getMessage(), HttpStatus.CONFLICT);
     }
     
     @ExceptionHandler(EventPublishException.class)

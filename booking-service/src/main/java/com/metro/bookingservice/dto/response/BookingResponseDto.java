@@ -17,4 +17,5 @@ public class BookingResponseDto {
     private double distanceKm;
     private String status;
     private LocalDateTime createdAt;
+    private LocalDateTime usedAt;
 }
